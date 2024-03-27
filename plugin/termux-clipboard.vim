@@ -1,110 +1,133 @@
-" wayland-clipboard.vim - Integrate with Wayland's clipboard when using the '+'
-" register. Requires wl-clipboard and the +eval and +clipboard Vim features.
+#!/usr/bin/env vim
+" termux-clipboard.vim - Yank/Put to/from Android clipboard via Vim
+" Version: 0.0.1
+" Maintainer: S0AndS0
+" License: AGPL-3.0
 "
-" This script was inspired by
-" https://www.reddit.com/r/Fedora/comments/ax9p9t/vim_and_system_clipboard_under_wayland/
-" but uses an autocmd to allow yanking with operators to work.
-
-" Early exit checks {{{
-
-" only load this script once
-if exists('g:loaded_wayland_clipboard')
-    finish
-endif
-let g:loaded_wayland_clipboard = 1
-
-" only run this in Vim on Wayland -- Vim on X has native clipboard support,
-" and Neovim already works with wl-copy by default
-if has('nvim') || empty($WAYLAND_DISPLAY)
-    finish
-endif
-
-" }}}
-
-" Yanking {{{
-
-" The '+' register doesn't work for yanking if:
-" - vim was built without 'clipboard'.
-" - x11 / xwayland is unavailable.
-" (https://github.com/vim/vim/blob/93197fde0f1db09b1e495cf3eb14a8f42c318b80/src/register.c#L247)
+" Inspiration:
+" - https://github.com/jasonccox/vim-wayland-clipboard
+" - https://stackoverflow.com/questions/61379318/how-to-copy-from-vim-to-system-clipboard-using-wayland-and-without-compiled-vim
 "
-" My solution is to map '"+' to '"w' and send the 'w' register to the
-" Wayland clipboard as well.
-"
-" This variable controls whether '"+' gets mapped to '"w'. It's on by default
-" if the 'clipboard' feature isn't available, or if $DISPLAY isn't set,
-" but the user can turn it off always if desired.
-let s:plus_to_w = (!has('clipboard') || empty($DISPLAY)) && !exists('g:wayland_clipboard_no_plus_to_w')
+" See:
+" - https://wiki.termux.com/wiki/Termux-clipboard-get
+" - https://wiki.termux.com/wiki/Termux-clipboard-set
 
-" remap '"+' to '"w' -- this will only apply to yanking since '"+p' and '"+P'
-" are also remapped below
-if s:plus_to_w
-    nnoremap "+ "w
-    vnoremap "+ "w
+
+""
+" Fast finish if already loaded or Vim version is bellow target
+if exists('g:termux_clipboard__loaded') || v:version < 700
+	finish
 endif
+let g:termux_clipboard__loaded = 1
 
-let s:copy_args = exists('g:wayland_clipboard_copy_args') ? g:wayland_clipboard_copy_args : []
 
-" pass register contents to wl-copy if the '+' (or 'w') register was used
-function! s:WaylandYank()
-    if v:event['regname'] == '+' ||
-                \ (v:event['regname'] == 'w' && s:plus_to_w) ||
-                \ (v:event['regname'] == '' && &clipboard =~ 'unnamedplus')
-        silent call job_start(['wl-copy'] + s:copy_args + ['--', getreg(v:event['regname'])], {
-            \   "in_io": "null", "out_io": "null", "err_io": "null",
-            \   "stoponexit": "",
-            \ })
-    endif
+""
+" Merged dictionary without mutation
+" Parameter: {dict} defaults
+" Parameter: {...dict[]} overrides
+" Return: {dict}
+" See: {docs} :help type()
+" See: {link} https://vi.stackexchange.com/questions/20842/how-can-i-merge-two-dictionaries-in-vim
+function s:Dict_Merge(defaults, ...) abort
+	let l:new = copy(a:defaults)
+	if a:0 == 0
+		return l:new
+	endif
+
+	for l:override in a:000
+		for [l:key, l:value] in items(l:override)
+			if type(l:value) == type({}) && type(get(l:new, l:key)) == type({})
+				let l:new[l:key] = s:Dict_Merge(l:new[l:key], l:value)
+			else
+				let l:new[l:key] = l:value
+			endif
+		endfor
+	endfor
+
+	return l:new
 endfunction
 
-" run s:WaylandYank() after every time text is yanked
-augroup waylandyank
-    autocmd!
-    autocmd TextYankPost * call s:WaylandYank()
+
+""
+" Configurations that may be overwritten
+let s:defaults = {}
+
+
+""
+" See: {docs} :help fnamemodify()
+" See: {docs} :help readfile()
+" See: {docs} :help json_decode()
+if exists('g:termux_clipboard')
+	if type(g:termux_clipboard) == type('') && fnamemodify(g:termux_clipboard, ':e') == 'json'
+		let g:termux_clipboard = json_decode(join(readfile(g:termux_clipboard), ''))
+	endif
+
+	if type(g:termux_clipboard) == type({})
+		let g:termux_clipboard = s:Dict_Merge(s:defaults, g:termux_clipboard)
+	else
+		let g:termux_clipboard = s:defaults
+	endif
+else
+	let g:termux_clipboard = s:defaults
+endif
+
+
+""
+" ... Registration of mode mapping should be added here...
+
+""
+" See: {docs} :help TextYankPost
+" See: {docs} :help job_start
+function! s:Termux_Yank()
+	if v:event['regname'] == '+' || v:event['regname'] == ''
+				silent call job_start(['termux-clipboard-set'] + [getreg(v:event['regname'])], {
+					\ 	"in_io": "null",
+					\ 	"out_io": "null",
+					\ 	"err_io": "null",
+					\ 	"stoponexit": "",
+					\ })
+	endif
+endfunction
+
+augroup TermuxYank
+	autocmd!
+	autocmd TextYankPost * call s:Termux_Yank()
 augroup END
 
-" }}}
-
-" Pasting {{{
-
-" remap paste commands to first pull in clipboard contents with wl-paste
-
-let s:paste_args = exists('g:wayland_clipboard_paste_args') ? g:wayland_clipboard_paste_args : []
-let s:paste_args_str = empty(s:paste_args) ? '' : ' ' . join(s:paste_args)
-
 function! s:clipboard_to_unnamed()
-    silent let @"=substitute(system('wl-paste --no-newline' . s:paste_args_str), "\r", '', 'g')
+	silent let @"=system('termux-clipboard-get')
 endfunction
 
 function! s:put(p, fallback)
-    if a:fallback
-        return a:p
-    endif
+	if a:fallback
+			return a:p
+	endif
 
-    call s:clipboard_to_unnamed()
-    return '""' . a:p
+	call s:clipboard_to_unnamed()
+	return '""' . a:p
 endfunction
 
 function! s:ctrl_r(cr)
-    call s:clipboard_to_unnamed()
-    return a:cr . '"'
+	call s:clipboard_to_unnamed()
+	return a:cr . '"'
 endfunction
 
 nnoremap <expr> <silent> "+p <SID>put('p', v:false)
 nnoremap <expr> <silent> "+P <SID>put('P', v:false)
-nnoremap <expr> <silent> p <SID>put('p', &clipboard !~ 'unnamedplus')
-nnoremap <expr> <silent> P <SID>put('P', &clipboard !~ 'unnamedplus')
+nnoremap <expr> <silent> p <SID>put('p', has('clipboard') && clipboard !~ 'unnamedplus')
+nnoremap <expr> <silent> P <SID>put('P', has('clipboard') && clipboard !~ 'unnamedplus')
+
 
 vnoremap <expr> <silent> "+p <SID>put('p', v:false)
 vnoremap <expr> <silent> "+P <SID>put('P', v:false)
-vnoremap <expr> <silent> p <SID>put('p', &clipboard !~ 'unnamedplus')
-vnoremap <expr> <silent> P <SID>put('P', &clipboard !~ 'unnamedplus')
+vnoremap <expr> <silent> p <SID>put('p', has('clipboard') && &clipboard !~ 'unnamedplus')
+vnoremap <expr> <silent> P <SID>put('P', has('clipboard') && &clipboard !~ 'unnamedplus')
+
 
 inoremap <expr> <silent> <C-R>+ <SID>ctrl_r("\<C-R>")
 inoremap <expr> <silent> <C-R><C-R>+ <SID>ctrl_r("\<C-R>\<C-R>")
 inoremap <expr> <silent> <C-R><C-O>+ <SID>ctrl_r("\<C-R>\<C-O>")
 inoremap <expr> <silent> <C-R><C-P>+ <SID>ctrl_r("\<C-R>\<C-P>")
 
-" }}}
 
 " vim:foldmethod=marker:foldlevel=0
